@@ -10,7 +10,7 @@ import path from 'path'
 // ----------------------------------------------------------------------
 // URL to the raw JSON file containing modpack version info
 // Example JSON: { "version": "1.0.1", "url": "https://.../modpack.zip" }
-const MODPACK_MANIFEST_URL = 'https://raw.githubusercontent.com/mehmetaltinsoy/modpack/main/modpack-manifest.json'
+const MODPACK_MANIFEST_URL = 'https://raw.githubusercontent.com/LamyTheGoat/MinecraftLauncherModpackUpdater/main/modpack-manifest.json'
 
 export class UpdaterManager {
     private mainWindow: BrowserWindow
