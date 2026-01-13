@@ -25,7 +25,7 @@ const store = new Store()
 // CONFIGURATION (Placeholders)
 // ----------------------------------------------------------------------
 const MODPACK_URL = 'https://github.com/mehmetaltinsoy/modpack/releases/download/v1.0.0/modpack.zip' // TODO: REPLACE THIS
-const SERVER_IP = 'play.example.com' // TODO: REPLACE THIS
+const SERVER_IP = '93.113.57.69' // TODO: REPLACE THIS
 const SERVER_PORT = 25565
 
 // ----------------------------------------------------------------------
