@@ -67,7 +67,7 @@ export class JavaHandler {
         // We might need to handle strip-components or find the directory.
         // Adoptium usually has a top folder. Let's find it and verify path.
 
-        const children = fs.readdirSync(this.runtimeDir)
+        // const children = fs.readdirSync(this.runtimeDir)
         // If there is only one child and it's a directory, move content up or Adjust path?
         // Easier: Find the java executable dynamically inside the extracted structure.
 
