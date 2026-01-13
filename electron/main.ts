@@ -208,6 +208,35 @@ ipcMain.on('launch-game', async (_event, { username }) => {
     }
   }
 
+  // 2.5 Ensure Forge Installer Exists (Required for MCLC to install Forge)
+  if (activeManifest.forge) {
+    const forgeInstallerPath = path.join(MC_ROOT, 'forge-installer.jar')
+    if (!fs.existsSync(forgeInstallerPath)) {
+      win?.webContents.send('status', 'Downloading Forge Installer...')
+      try {
+        // URL format: https://maven.minecraftforge.net/net/minecraftforge/forge/1.20.1-47.2.0/forge-1.20.1-47.2.0-installer.jar
+        const forgeVersion = `${activeManifest.minecraft}-${activeManifest.forge}`
+        const forgeUrl = `https://maven.minecraftforge.net/net/minecraftforge/forge/${forgeVersion}/forge-${forgeVersion}-installer.jar`
+
+        const res = await fetch(forgeUrl)
+        if (!res.ok) throw new Error(`Forge download failed: ${res.statusText}`)
+
+        const fileStream = fs.createWriteStream(forgeInstallerPath)
+        await new Promise<void>((resolve, reject) => {
+          if (!res.body) return reject(new Error('No body'))
+          res.body.pipe(fileStream)
+          res.body.on('error', reject)
+          fileStream.on('finish', () => resolve())
+        })
+      } catch (e: any) {
+        console.error("Forge Download Error", e)
+        win?.webContents.send('status', 'Forge Download Failed: ' + e.message)
+        // Proceeding might fail, but let MCLC try or just return? 
+        // It will likely fail next step, so returning is safer but let's let it run to throw proper error
+      }
+    }
+  }
+
   // 3. Launch
 
   const opts = {
@@ -222,7 +251,7 @@ ipcMain.on('launch-game', async (_event, { username }) => {
       max: "4G",
       min: "2G"
     },
-    forge: path.join(MC_ROOT, 'forge-installer.jar'),
+    forge: activeManifest.forge ? path.join(MC_ROOT, 'forge-installer.jar') : undefined,
 
     loader: activeManifest.forge ? {
       type: "forge",
