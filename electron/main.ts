@@ -7,6 +7,7 @@ import fetch from 'node-fetch'
 import AdmZip from 'adm-zip'
 import Store from 'electron-store'
 import { UpdaterManager } from './updater'
+import { JavaHandler } from './javaHandler'
 
 const require = createRequire(import.meta.url)
 const { Client, Authenticator } = require('minecraft-launcher-core')
@@ -239,10 +240,23 @@ ipcMain.on('launch-game', async (_event, { username }) => {
 
   // 3. Launch
 
+  // Ensure Java 17
+  const javaHandler = new JavaHandler(MC_ROOT)
+  let javaPath = 'java' // Default to system java if check fails, but we expect check to work
+  try {
+    win?.webContents.send('status', 'Checking Java Runtime...')
+    javaPath = await javaHandler.ensureJava17()
+  } catch (e: any) {
+    console.error("Java Setup Failed:", e)
+    win?.webContents.send('status', 'Java Setup Failed: ' + e.message)
+    return
+  }
+
   const opts = {
     clientPackage: null,
     authorization: auth,
     root: MC_ROOT,
+    javaPath: javaPath,
     version: {
       number: activeManifest.minecraft,
       type: "release"
