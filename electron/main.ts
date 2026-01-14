@@ -164,10 +164,14 @@ ipcMain.on('launch-game', async (_event, { username }) => {
     activeManifest = {
       version: "1.0.0",
       minecraft: "1.20.1",
-      forge: "47.2.0",
       url: MODPACK_URL
+      // Note: No loader specified = vanilla Minecraft
     }
   }
+
+  // Determine loader type from manifest
+  const loaderType = activeManifest.fabric ? 'fabric' : (activeManifest.forge ? 'forge' : null)
+  console.log(`Detected loader type: ${loaderType || 'vanilla'}`)
 
   // If update needed OR zip doesn't exist (fresh install), download it
   if (startManifest || !fs.existsSync(modpackZipPath)) {
@@ -231,8 +235,8 @@ ipcMain.on('launch-game', async (_event, { username }) => {
     }
   }
 
-  // 2.5 Ensure Forge Installer Exists (Required for MCLC to install Forge)
-  if (activeManifest.forge) {
+  // 2.5 Ensure Loader Installer Exists (Forge or Fabric)
+  if (loaderType === 'forge' && activeManifest.forge) {
     const forgeInstallerPath = path.join(MC_ROOT, 'forge-installer.jar')
     if (!fs.existsSync(forgeInstallerPath)) {
       win?.webContents.send('status', 'Downloading Forge Installer...')
@@ -254,10 +258,12 @@ ipcMain.on('launch-game', async (_event, { username }) => {
       } catch (e: any) {
         console.error("Forge Download Error", e)
         win?.webContents.send('status', 'Forge Download Failed: ' + e.message)
-        // Proceeding might fail, but let MCLC try or just return? 
-        // It will likely fail next step, so returning is safer but let's let it run to throw proper error
       }
     }
+  } else if (loaderType === 'fabric' && activeManifest.fabric) {
+    // Fabric uses a different approach - MCLC can handle Fabric natively
+    win?.webContents.send('status', 'Preparing Fabric Loader...')
+    console.log(`Using Fabric loader version: ${activeManifest.fabric}`)
   }
 
   // 3. Launch
@@ -274,6 +280,23 @@ ipcMain.on('launch-game', async (_event, { username }) => {
     return
   }
 
+  // Build loader configuration based on detected type
+  let loaderConfig: any = undefined
+  let forgeConfig: string | undefined = undefined
+
+  if (loaderType === 'forge' && activeManifest.forge) {
+    forgeConfig = path.join(MC_ROOT, 'forge-installer.jar')
+    loaderConfig = {
+      type: "forge",
+      version: `${activeManifest.minecraft}-${activeManifest.forge}`
+    }
+  } else if (loaderType === 'fabric' && activeManifest.fabric) {
+    loaderConfig = {
+      type: "fabric",
+      version: activeManifest.fabric
+    }
+  }
+
   const opts = {
     clientPackage: null,
     authorization: auth,
@@ -287,13 +310,8 @@ ipcMain.on('launch-game', async (_event, { username }) => {
       max: "4G",
       min: "2G"
     },
-    forge: activeManifest.forge ? path.join(MC_ROOT, 'forge-installer.jar') : undefined,
-
-    loader: activeManifest.forge ? {
-      type: "forge",
-      version: `${activeManifest.minecraft}-${activeManifest.forge}`
-    } : undefined,
-
+    forge: forgeConfig,
+    loader: loaderConfig,
     quickPlay: {
       type: "multiplayer",
       identifier: `${SERVER_IP}:${SERVER_PORT}`
