@@ -11,7 +11,7 @@ import { JavaHandler } from './javaHandler'
 import * as crypto from 'crypto'
 
 const require = createRequire(import.meta.url)
-const { Client, Authenticator } = require('minecraft-launcher-core')
+const { Client } = require('minecraft-launcher-core')
 const msmc = require('msmc')
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -27,7 +27,7 @@ const store = new Store()
 // ----------------------------------------------------------------------
 // CONFIGURATION (Placeholders)
 // ----------------------------------------------------------------------
-const MODPACK_URL = 'https://github.com/mehmetaltinsoy/modpack/releases/download/v1.0.0/modpack.zip' // TODO: REPLACE THIS
+const MODPACK_URL = 'https://github.com/LamyTheGoat/MinecraftLauncherModpackUpdater/releases/download/modpackver1.0.2/modpack.zip' // UPDATED FROM MANIFEST
 const SERVER_IP = '93.113.57.69' // TODO: REPLACE THIS
 const SERVER_PORT = 25565
 
@@ -134,13 +134,47 @@ ipcMain.on('launch-game', async (_event, { username }) => {
     meta: {}
   }
 
+  // 1.5 Helper for Deterministic Offline Auth
+  function getOfflineAuth(username: string) {
+    // Standard Minecraft Offline UUID is MD5 of "OfflinePlayer:Name"
+    const hash = crypto.createHash('md5').update(`OfflinePlayer:${username}`).digest()
+
+    // Set version to 3 (MD5 based)
+    hash[6] = (hash[6] & 0x0f) | 0x30
+    // Set variant to RFC 4122
+    hash[8] = (hash[8] & 0x3f) | 0x80
+
+    const hex = hash.toString('hex')
+    const uuid = `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20, 32)}`
+
+    // Use the same UUID as the access_token for simplicity and uniqueness
+    const accessToken = hex
+
+    // Client token should be unique to the installation to avoid session conflicts
+    let clientToken: string = store.get('client_token') as string
+    if (!clientToken) {
+      clientToken = crypto.randomBytes(16).toString('hex')
+      store.set('client_token', clientToken)
+    }
+
+    return {
+      access_token: accessToken,
+      client_token: clientToken,
+      uuid: uuid,
+      name: username,
+      user_properties: '{}',
+      meta: { type: 'offline' }
+    }
+  }
+
   const savedProfile: any = store.get('mc_profile')
   // If saved profile matches requested username (or if we just use saved profile for Online mode)
   if (savedProfile && savedProfile.name === username) {
     auth = savedProfile
   } else {
-    // Offline / Cracked mode or just username
-    auth = Authenticator.getAuth(username)
+    // Use Deterministic Offline Auth instead of MCLC's random one
+    auth = getOfflineAuth(username)
+    console.log(`Generated deterministic offline auth for ${username}: ${auth.uuid}`)
   }
 
   // ----------------------------------------------------------------------
