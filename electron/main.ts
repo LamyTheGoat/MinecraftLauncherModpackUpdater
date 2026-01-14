@@ -162,10 +162,10 @@ ipcMain.on('launch-game', async (_event, { username }) => {
   // Fallback defaults if no local manifest exists yet
   if (!activeManifest) {
     activeManifest = {
-      version: "1.0.0",
-      minecraft: "1.20.1",
+      version: "1.0.8",
+      minecraft: "1.21.8",
+      fabric: "0.18.4",
       url: MODPACK_URL
-      // Note: No loader specified = vanilla Minecraft
     }
   }
 
@@ -332,7 +332,8 @@ ipcMain.on('launch-game', async (_event, { username }) => {
   })
 
   console.log("Starting launcher with opts:", opts)
-  win?.webContents.send('status', 'Launching Minecraft...')
+  const typeStr = loaderType ? `${loaderType} (v${loaderType === 'fabric' ? activeManifest.fabric : activeManifest.forge})` : 'Vanilla'
+  win?.webContents.send('status', `Launching Minecraft ${activeManifest.minecraft} (${typeStr})...`)
 
   try {
     await launcher.launch(opts)
