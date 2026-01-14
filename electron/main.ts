@@ -8,6 +8,7 @@ import AdmZip from 'adm-zip'
 import Store from 'electron-store'
 import { UpdaterManager } from './updater'
 import { JavaHandler } from './javaHandler'
+import * as crypto from 'crypto'
 
 const require = createRequire(import.meta.url)
 const { Client, Authenticator } = require('minecraft-launcher-core')
@@ -264,77 +265,85 @@ ipcMain.on('launch-game', async (_event, { username }) => {
     // Manual Fabric Installation
     win?.webContents.send('status', 'Installing Fabric Loader...')
     try {
+      // Check if Fabric JSON already exists to skip installer (prevents network crash)
+      const fabVersion = `fabric-loader-${activeManifest.fabric}-${activeManifest.minecraft}`
+      const jsonPath = path.join(MC_ROOT, 'versions', fabVersion, `${fabVersion}.json`)
       const installerPath = path.join(MC_ROOT, 'fabric-installer.jar')
-      // Download installer if missing
-      if (!fs.existsSync(installerPath)) {
-        // Fetch latest installer version
-        const metaRes = await fetch('https://meta.fabricmc.net/v2/versions/installer')
-        if (!metaRes.ok) throw new Error('Failed to fetch fabric installer meta')
-        const meta: any = await metaRes.json()
-        const installerUrl = meta[0].url
 
-        const res = await fetch(installerUrl)
-        if (!res.ok) throw new Error('Failed to download fabric installer')
+      if (!fs.existsSync(jsonPath)) {
+        // Download installer if missing
+        if (!fs.existsSync(installerPath)) {
+          // ... (keep installer download logic)
+          // Fetch latest installer version
+          const metaRes = await fetch('https://meta.fabricmc.net/v2/versions/installer')
+          if (!metaRes.ok) throw new Error('Failed to fetch fabric installer meta')
+          const meta: any = await metaRes.json()
+          const installerUrl = meta[0].url
 
-        const fileStream = fs.createWriteStream(installerPath)
+          const res = await fetch(installerUrl)
+          if (!res.ok) throw new Error('Failed to download fabric installer')
+
+          const fileStream = fs.createWriteStream(installerPath)
+          await new Promise<void>((resolve, reject) => {
+            if (!res.body) return reject(new Error('No body'))
+            res.body.pipe(fileStream)
+            res.body.on('error', reject)
+            fileStream.on('finish', () => resolve())
+          })
+        }
+
+        // Ensure Java is ready
+        const javaHandler = new JavaHandler(MC_ROOT)
+        const javaPath = await javaHandler.ensureJava()
+
+        // Run Installer
+        const installCmd = `"${javaPath}" -jar "${installerPath}" client -dir "${MC_ROOT}" -mcversion ${activeManifest.minecraft} -loader ${activeManifest.fabric} -noprofile`
+        console.log('Running Fabric Installer:', installCmd)
+
+        const { exec } = require('child_process')
         await new Promise<void>((resolve, reject) => {
-          if (!res.body) return reject(new Error('No body'))
-          res.body.pipe(fileStream)
-          res.body.on('error', reject)
-          fileStream.on('finish', () => resolve())
+          exec(installCmd, (err: any, stdout: any, stderr: any) => {
+            if (err) {
+              console.error(stderr)
+              reject(err)
+            } else {
+              console.log(stdout)
+              resolve()
+            }
+          })
         })
       }
 
-      // Ensure Java is ready
-      const javaHandler = new JavaHandler(MC_ROOT)
-      const javaPath = await javaHandler.ensureJava()
-
-      // Run Installer
-      // java -jar installer.jar client -dir "..." -mcversion ... -loader ... -noprofile
-      const installCmd = `"${javaPath}" -jar "${installerPath}" client -dir "${MC_ROOT}" -mcversion ${activeManifest.minecraft} -loader ${activeManifest.fabric} -noprofile`
-      console.log('Running Fabric Installer:', installCmd)
-
-      const { exec } = require('child_process')
-      await new Promise<void>((resolve, reject) => {
-        exec(installCmd, (err: any, stdout: any, stderr: any) => {
-          if (err) {
-            console.error(stderr)
-            reject(err)
-          } else {
-            console.log(stdout)
-            resolve()
-          }
-        })
-      })
-
-      // Patch the generated JSON to prevent MCLC crash ("reading 'client'" and "reading 'url'" for assets)
-      const fabVersion = `fabric-loader-${activeManifest.fabric}-${activeManifest.minecraft}`
-      const jsonPath = path.join(MC_ROOT, 'versions', fabVersion, `${fabVersion}.json`)
-
+      // Patch the generated JSON
       if (fs.existsSync(jsonPath)) {
         let jsonContent = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'))
         let save = false;
 
-        // 1. Fix 'downloads.client' using local file URI to avoid DNS errors
+        // 1. Fix 'downloads.client' using REAL SHA1 to bypass download
         if (!jsonContent.downloads) jsonContent.downloads = {}
-        // Always overwrite to ensure valid URI
-        const localJarPath = path.join(MC_ROOT, 'versions', activeManifest.minecraft, `${activeManifest.minecraft}.jar`)
-        const fileUrl = 'file:///' + localJarPath.replace(/\\/g, '/')
-        jsonContent.downloads.client = {
-          url: fileUrl,
-          sha1: "0000000000000000000000000000000000000000",
-          size: 0
-        }
-        save = true
 
-        // 2. Fix 'assetIndex' if missing or invalid (Common cause of crash with custom versions)
+        const localJarPath = path.join(MC_ROOT, 'versions', activeManifest.minecraft, `${activeManifest.minecraft}.jar`)
+        if (fs.existsSync(localJarPath)) {
+          const buffer = fs.readFileSync(localJarPath)
+          const hash = crypto.createHash('sha1').update(buffer).digest('hex')
+
+          // Inject valid entry matching local file
+          jsonContent.downloads.client = {
+            url: "http://localhost/dummy_client.jar", // URL won't be used if SHA1 matches
+            sha1: hash,
+            size: fs.statSync(localJarPath).size
+          }
+          save = true
+        }
+
+        // 2. Fix 'assetIndex' if missing
         if (!jsonContent.assetIndex || !jsonContent.assetIndex.url) {
           try {
             console.log("Fetching fallback asset index from Mojang...")
             const manifestRes = await fetch('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json')
             if (manifestRes.ok) {
               const manifest: any = await manifestRes.json()
-              const latest = manifest.versions.find((v: any) => v.id === '1.21.4') // Use 1.21.4 as base for assets
+              const latest = manifest.versions.find((v: any) => v.id === '1.21.4')
               if (latest) {
                 const versionRes = await fetch(latest.url)
                 if (versionRes.ok) {
@@ -402,7 +411,7 @@ ipcMain.on('launch-game', async (_event, { username }) => {
     : activeManifest.minecraft
 
   const opts = {
-    clientPackage: null,
+    // clientPackage: null, // Removed duplicate
     authorization: auth,
     root: MC_ROOT,
     javaPath: javaPath,
@@ -411,6 +420,7 @@ ipcMain.on('launch-game', async (_event, { username }) => {
       type: "release",
       custom: (loaderType === 'fabric') ? customVersion : undefined
     },
+    // clientPackage removed to prevent "Invalid filename" error
     memory: {
       max: "4G",
       min: "2G"
