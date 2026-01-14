@@ -98,11 +98,14 @@ ipcMain.handle('check-auth', async () => {
 
 // 2. Microsoft Login
 ipcMain.handle('login-microsoft', async () => {
+  console.log("Starting Microsoft Login Flow...")
   try {
     const authManager = new msmc.Auth("select_account")
     // Use Electron window for auth
     const xboxManager = await authManager.launch("electron")
+    console.log("Microsoft/Xbox Auth Success")
     const token = await xboxManager.getMinecraft()
+    console.log(`Minecraft Profile Fetched: ${token.mclc().name} (${token.mclc().uuid})`)
 
     // Unified Client Token for consistency
     let clientToken: string = store.get('client_token') as string
@@ -129,14 +132,14 @@ ipcMain.handle('login-microsoft', async () => {
 })
 
 ipcMain.handle('logout', async () => {
-  store.delete('mc_profile')
-  store.delete('client_token') // Clear machine identity to avoid being "stuck"
-  console.log("Identity hard reset performed.")
+  console.log("PERFORMING HARD RESET: Clearing all local store data.")
+  store.clear() // WIPE EVERYTHING
   return { success: true }
 })
 
 // 3. Launch Game
 ipcMain.on('launch-game', async (_event, { username }) => {
+  console.log(`LAUNCH REQUEST for username: "${username}"`)
   const launcher = new Client()
 
   // Auth setup
