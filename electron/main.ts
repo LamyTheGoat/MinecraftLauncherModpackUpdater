@@ -307,26 +307,55 @@ ipcMain.on('launch-game', async (_event, { username }) => {
         })
       })
 
-      // Patch the generated JSON to prevent MCLC crash ("reading 'client'")
+      // Patch the generated JSON to prevent MCLC crash ("reading 'client'" and "reading 'url'" for assets)
       const fabVersion = `fabric-loader-${activeManifest.fabric}-${activeManifest.minecraft}`
       const jsonPath = path.join(MC_ROOT, 'versions', fabVersion, `${fabVersion}.json`)
 
       if (fs.existsSync(jsonPath)) {
-        const jsonContent = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'))
-        if (!jsonContent.downloads) {
-          jsonContent.downloads = {}
+        let jsonContent = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'))
+        let save = false;
+
+        // 1. Fix 'downloads.client' using local file URI to avoid DNS errors
+        if (!jsonContent.downloads) jsonContent.downloads = {}
+        // Always overwrite to ensure valid URI
+        const localJarPath = path.join(MC_ROOT, 'versions', activeManifest.minecraft, `${activeManifest.minecraft}.jar`)
+        const fileUrl = 'file:///' + localJarPath.replace(/\\/g, '/')
+        jsonContent.downloads.client = {
+          url: fileUrl,
+          sha1: "0000000000000000000000000000000000000000",
+          size: 0
         }
-        if (!jsonContent.downloads.client) {
-          // Inject dummy client to satisfy MCLC checks. 
-          // Inheritance means it uses the parent jar, but MCLC 3.18 check might be strict on the child JSON.
-          jsonContent.downloads.client = {
-            url: "https://invalid.url/dummy-client.jar",
-            sha1: "0000000000000000000000000000000000000000",
-            size: 0
+        save = true
+
+        // 2. Fix 'assetIndex' if missing or invalid (Common cause of crash with custom versions)
+        if (!jsonContent.assetIndex || !jsonContent.assetIndex.url) {
+          try {
+            console.log("Fetching fallback asset index from Mojang...")
+            const manifestRes = await fetch('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json')
+            if (manifestRes.ok) {
+              const manifest: any = await manifestRes.json()
+              const latest = manifest.versions.find((v: any) => v.id === '1.21.4') // Use 1.21.4 as base for assets
+              if (latest) {
+                const versionRes = await fetch(latest.url)
+                if (versionRes.ok) {
+                  const versionJson: any = await versionRes.json()
+                  if (versionJson.assetIndex) {
+                    jsonContent.assetIndex = versionJson.assetIndex
+                    save = true
+                    console.log("Injected assetIndex from 1.21.4")
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            console.error("Failed to fetch fallback assets", e)
           }
         }
-        fs.writeFileSync(jsonPath, JSON.stringify(jsonContent, null, 2))
-        console.log(`Patched Fabric JSON at ${jsonPath}`)
+
+        if (save) {
+          fs.writeFileSync(jsonPath, JSON.stringify(jsonContent, null, 2))
+          console.log(`Patched Fabric JSON at ${jsonPath}`)
+        }
       }
 
       win?.webContents.send('status', 'Fabric Installed.')
