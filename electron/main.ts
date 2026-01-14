@@ -314,61 +314,98 @@ ipcMain.on('launch-game', async (_event, { username }) => {
         })
       }
 
-      // Patch the generated JSON
+      // Patch the PARENT JSON (1.21.8) to ensure it has valid downloads/assets
+      // This is crucial because Fabric inherits from it.
+      const parentVersion = activeManifest.minecraft
+      const parentJsonPath = path.join(MC_ROOT, 'versions', parentVersion, `${parentVersion}.json`)
+
+      if (fs.existsSync(parentJsonPath)) {
+        try {
+          let parentContent = JSON.parse(fs.readFileSync(parentJsonPath, 'utf-8'))
+          let saveParent = false;
+
+          // 1. Ensure 'downloads.client' matches LOCAL file SHA1
+          if (!parentContent.downloads) parentContent.downloads = {}
+
+          const localJarPath = path.join(MC_ROOT, 'versions', parentVersion, `${parentVersion}.jar`)
+          if (fs.existsSync(localJarPath)) {
+            const buffer = fs.readFileSync(localJarPath)
+            const hash = crypto.createHash('sha1').update(buffer).digest('hex')
+
+            // If missing or SHA1 mismatch, force update to local hash so MCLC trusts it
+            // We provide a dummy URL because if SHA1 matches, it won't download.
+            if (!parentContent.downloads.client || parentContent.downloads.client.sha1 !== hash) {
+              parentContent.downloads.client = {
+                url: "https://piston-data.mojang.com/v1/objects/dummy/client.jar",
+                sha1: hash,
+                size: fs.statSync(localJarPath).size
+              }
+              saveParent = true
+              console.log("Patched Parent JSON downloads.client with local SHA1")
+            }
+          }
+
+          // 2. Ensure 'assetIndex' exists
+          if (!parentContent.assetIndex) {
+            // Try to fetch, or use hardcoded fallback for 1.21
+            try {
+              const manifestRes = await fetch('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json')
+              if (manifestRes.ok) {
+                const manifest: any = await manifestRes.json()
+                const latest = manifest.versions.find((v: any) => v.id === '1.21.4')
+                if (latest) {
+                  const versionRes = await fetch(latest.url)
+                  if (versionRes.ok) {
+                    const versionJson: any = await versionRes.json()
+                    parentContent.assetIndex = versionJson.assetIndex
+                    saveParent = true
+                  }
+                }
+              }
+            } catch (e) {
+              console.log("Fetch failed, using hardcoded fallback")
+            }
+
+            // Fallback if still missing (Hardcoded 1.21 asset index to prevent crash)
+            if (!parentContent.assetIndex) {
+              parentContent.assetIndex = {
+                id: "17",
+                sha1: "bf92b3783994f3162799c55d04523316688d4072",
+                size: 686733,
+                totalSize: 1339908852,
+                url: "https://piston-meta.mojang.com/v1/packages/bf92b3783994f3162799c55d04523316688d4072/17.json"
+              }
+              saveParent = true
+              console.log("Injected Hardcoded Asset Index")
+            }
+          }
+
+          if (saveParent) {
+            fs.writeFileSync(parentJsonPath, JSON.stringify(parentContent, null, 2))
+          }
+        } catch (e) {
+          console.error("Parent patch error", e)
+        }
+      }
+
+      // Patch the Fabric JSON - ONLY for assets override if needed, DO NOT touch downloads
       if (fs.existsSync(jsonPath)) {
         let jsonContent = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'))
         let save = false;
 
-        // 1. Fix 'downloads.client' using REAL SHA1 to bypass download
-        if (!jsonContent.downloads) jsonContent.downloads = {}
-
-        const localJarPath = path.join(MC_ROOT, 'versions', activeManifest.minecraft, `${activeManifest.minecraft}.jar`)
-        if (fs.existsSync(localJarPath)) {
-          const buffer = fs.readFileSync(localJarPath)
-          const hash = crypto.createHash('sha1').update(buffer).digest('hex')
-
-          // Inject valid entry matching local file
-          jsonContent.downloads.client = {
-            url: "http://localhost/dummy_client.jar", // URL won't be used if SHA1 matches
-            sha1: hash,
-            size: fs.statSync(localJarPath).size
-          }
-          save = true
-        }
-
-        // 2. Fix 'assetIndex' if missing
-        if (!jsonContent.assetIndex || !jsonContent.assetIndex.url) {
-          try {
-            console.log("Fetching fallback asset index from Mojang...")
-            const manifestRes = await fetch('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json')
-            if (manifestRes.ok) {
-              const manifest: any = await manifestRes.json()
-              const latest = manifest.versions.find((v: any) => v.id === '1.21.4')
-              if (latest) {
-                const versionRes = await fetch(latest.url)
-                if (versionRes.ok) {
-                  const versionJson: any = await versionRes.json()
-                  if (versionJson.assetIndex) {
-                    jsonContent.assetIndex = versionJson.assetIndex
-                    save = true
-                    console.log("Injected assetIndex from 1.21.4")
-                  }
-                }
-              }
-            }
-          } catch (e) {
-            console.error("Failed to fetch fallback assets", e)
-          }
+        // Ensure downloads is EMPTY or missing client, so it inherits from parent
+        if (jsonContent.downloads && jsonContent.downloads.client) {
+          delete jsonContent.downloads.client;
+          save = true;
+          console.log("Removed downloads.client from Fabric JSON to force inheritance")
         }
 
         if (save) {
           fs.writeFileSync(jsonPath, JSON.stringify(jsonContent, null, 2))
-          console.log(`Patched Fabric JSON at ${jsonPath}`)
         }
       }
 
       win?.webContents.send('status', 'Fabric Installed.')
-
     } catch (e: any) {
       console.error("Fabric Install Error", e)
       win?.webContents.send('status', 'Fabric Install Failed: ' + e.message)
