@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 
 function App(): JSX.Element {
-  const [status, setStatus] = useState('Idle')
+  const [status, setStatus] = useState('Initializing...')
   const [progress, setProgress] = useState(0)
   const [username, setUsername] = useState('Player')
   const [view, setView] = useState<'LOGIN' | 'LAUNCHER'>('LOGIN')

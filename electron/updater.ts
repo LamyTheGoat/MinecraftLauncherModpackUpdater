@@ -6,11 +6,8 @@ import * as fs from 'fs'
 import path from 'path'
 
 // ----------------------------------------------------------------------
-// CONFIGURATION
-// ----------------------------------------------------------------------
-// URL to the raw JSON file containing modpack version info
-// Example JSON: { "version": "1.0.1", "url": "https://.../modpack.zip" }
-const MODPACK_MANIFEST_URL = 'https://raw.githubusercontent.com/LamyTheGoat/MinecraftLauncherModpackUpdater/main/modpack-manifest.json'
+// URL to the GitHub API for modpack manifest (bypasses CDN caching)
+const GITHUB_API_MANIFEST_URL = 'https://api.github.com/repos/LamyTheGoat/MinecraftLauncherModpackUpdater/contents/modpack-manifest.json'
 
 export class UpdaterManager {
     private mainWindow: BrowserWindow
@@ -45,41 +42,75 @@ export class UpdaterManager {
         })
     }
 
-    sendStatus(text: string) {
-        this.mainWindow.webContents.send('status', text)
+    private sendStatus(msg: string) {
+        this.mainWindow.webContents.send('status', msg)
     }
 
     // Check for App Updates
-    checkForAppUpdates() {
+    async checkForAppUpdates() {
         autoUpdater.checkForUpdatesAndNotify()
     }
 
     // Check for Modpack Updates
     async checkModpackUpdates(): Promise<any | null> {
-        this.sendStatus('Checking modpack version...')
         try {
-            const resp = await fetch(MODPACK_MANIFEST_URL)
-            if (!resp.ok) throw new Error('Failed to fetch manifest')
+            console.log("[UPDATER] Fetching manifest via GitHub API...")
+            const resp = await fetch(GITHUB_API_MANIFEST_URL, {
+                headers: {
+                    'Accept': 'application/vnd.github.v3+json',
+                    'User-Agent': 'Minecraft-Launcher-Updater'
+                }
+            })
 
-            const manifest: any = await resp.json()
+            if (!resp.ok) {
+                const errorData = await resp.text();
+                throw new Error(`Failed to fetch manifest: ${resp.status} ${resp.statusText} - ${errorData}`)
+            }
+
+            const apiData: any = await resp.json()
+            if (!apiData.content) throw new Error("Manifest content field is missing from API response")
+
+            // Base64 Decode
+            const decodedContent = Buffer.from(apiData.content, 'base64').toString('utf-8')
+            const manifest = JSON.parse(decodedContent)
+
             const localManifestPath = path.join(this.modpackRoot, 'modpack-info.json')
-
             let localVersion = '0.0.0'
+            let localData: any = null
+
             if (fs.existsSync(localManifestPath)) {
-                const localData = JSON.parse(fs.readFileSync(localManifestPath, 'utf-8'))
+                localData = JSON.parse(fs.readFileSync(localManifestPath, 'utf-8'))
                 localVersion = localData.version
             }
 
-            if (manifest.version !== localVersion) {
-                this.sendStatus(`New modpack version found: ${manifest.version}`)
-                return manifest // Return full manifest
+            // Normalize URLs for comparison (empty is preserved as "")
+            const remoteUrl = (manifest.url || "").trim()
+            const localUrl = (localData?.url || "").trim()
+
+            let isDifferent = manifest.version !== localVersion
+
+            // Check if other fields changed too
+            if (!isDifferent && localData) {
+                if (remoteUrl !== localUrl) isDifferent = true
+                if (manifest.minecraft !== (localData.minecraft || "")) isDifferent = true
+                if (manifest.fabric !== (localData.fabric || "")) isDifferent = true
+            }
+
+            console.log(`[UPDATER] Comparing Manifests (API Source):`)
+            console.log(`  - Remote: v${manifest.version}, url: "${remoteUrl}"`)
+            console.log(`  - Local:  v${localVersion}, url: "${localUrl}"`)
+            console.log(`  - result: ${isDifferent ? 'UPDATE NEEDED' : 'UP TO DATE'}`)
+
+            if (isDifferent) {
+                this.sendStatus(`Update found! (Manifest changed)`)
+                return manifest
             }
 
             this.sendStatus('Modpack is up to date.')
             return null
 
         } catch (e: any) {
-            console.error(e)
+            console.error("MANIFEST FETCH ERROR:", e)
             this.sendStatus('Failed to check modpack updates: ' + e.message)
             return null
         }

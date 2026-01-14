@@ -1,3 +1,4 @@
+console.log("Electron main process starting...")
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
@@ -17,12 +18,26 @@ const msmc = require('msmc')
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // App Data Path for Minecraft
+let cachedMcRoot: string | null = null
+function getMcRoot() {
+  if (cachedMcRoot) return cachedMcRoot
+  const root = path.join(app.getPath('userData'), 'minecraft_instance')
+  if (!fs.existsSync(root)) fs.mkdirSync(root, { recursive: true })
+  cachedMcRoot = root
+  return root
+}
 
-const MC_ROOT = path.join(app.getPath('userData'), 'minecraft_instance')
-if (!fs.existsSync(MC_ROOT)) fs.mkdirSync(MC_ROOT, { recursive: true })
 
 // Store for Auth
 const store = new Store()
+
+// Global Error Handlers for debugging
+process.on('uncaughtException', (err) => {
+  console.error('CRITICAL UNCAUGHT EXCEPTION:', err)
+})
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('UNHANDLED REJECTION at:', promise, 'reason:', reason)
+})
 
 // ----------------------------------------------------------------------
 // CONFIGURATION (Placeholders)
@@ -65,6 +80,14 @@ function createWindow() {
   } else {
     win.loadFile(path.join(RENDERER_DIST, 'index.html'))
   }
+
+  // Handle modpack sync after UI is ready
+  win.webContents.once('did-finish-load', () => {
+    console.log("Main window loaded, starting background sync...")
+    syncModpack(win!).catch(err => {
+      console.error("Background sync failed:", err)
+    })
+  })
 }
 
 app.on('window-all-closed', () => {
@@ -80,7 +103,182 @@ app.on('activate', () => {
   }
 })
 
-app.whenReady().then(createWindow)
+app.whenReady().then(() => {
+  console.log("App Ready, creating window...")
+  createWindow()
+})
+
+// ----------------------------------------------------------------------
+// MODPACK SYNC LOGIC
+// ----------------------------------------------------------------------
+let syncPromise: Promise<any> | null = null
+
+async function syncModpack(browserWindow: BrowserWindow) {
+  if (syncPromise) {
+    console.log("Sync already in progress, waiting for it...")
+    return syncPromise
+  }
+
+  syncPromise = (async () => {
+    try {
+      console.log(`[SYNC] Starting sync in: ${getMcRoot()}`)
+      const updater = new UpdaterManager(browserWindow, getMcRoot())
+
+      // 1. Check App Updates (Async, don't block)
+      updater.checkForAppUpdates()
+
+      // 2. Check Modpack Updates
+      const startManifest = await updater.checkModpackUpdates() // Returns Manifest if any field changed
+      const modpackZipPath = path.join(getMcRoot(), 'modpack.zip')
+      const modsPath = path.join(getMcRoot(), 'mods')
+
+      // MERGE STRATEGY: Default <- Local <- Remote
+      // This ensures we always have minecraft and fabric versions even if remote is partial
+      const localManifest = updater.getLocalManifest()
+      const DEFAULT_MANIFEST = {
+        version: "1.0.8",
+        minecraft: "1.21.8",
+        fabric: "0.18.4",
+        url: "" // Default to empty to allow forced reset
+      }
+
+      let activeManifest = {
+        ...DEFAULT_MANIFEST,
+        ...(localManifest || {}),
+        ...(startManifest || {})
+      }
+
+      // If local is missing completely, we might want the hardcoded default
+      if (!localManifest && !startManifest && !activeManifest.url) {
+        activeManifest.url = MODPACK_URL
+      }
+
+      const zipExists = fs.existsSync(modpackZipPath)
+      const modsExists = fs.existsSync(modsPath)
+      const downloadUrl = (activeManifest.url || "").trim()
+
+      console.log(`[SYNC] Check: updateDetected=${!!startManifest}, zipExists=${zipExists}, modsExists=${modsExists}`)
+      console.log(`[SYNC] Resolved Versions: MC=${activeManifest.minecraft}, Fabric=${activeManifest.fabric}, Pack=${activeManifest.version}, URL="${downloadUrl}"`)
+
+      // MANDATORY EMPTY URL CLEANUP: If URL is empty and mods exist, CLEAR THEM
+      if (!downloadUrl) {
+        if (modsExists || zipExists) {
+          console.log("[SYNC] URL is empty but mods/zip exist. Clearing modpack state...")
+          browserWindow.webContents.send('status', 'Clearing modpack (Empty URL)...')
+
+          const keepList = ['versions', 'libraries', 'assets', 'runtime', 'java', 'modpack-info.json']
+          const files = fs.readdirSync(getMcRoot())
+          for (const file of files) {
+            if (!keepList.includes(file)) {
+              const fullPath = path.join(getMcRoot(), file)
+              try { console.log(`[SYNC] Clearing: ${file}`); fs.rmSync(fullPath, { recursive: true, force: true }) } catch (e) { }
+            }
+          }
+
+          browserWindow.webContents.send('status', 'Modpack Cleared.')
+        } else {
+          console.log("[SYNC] URL is empty and folder is already clean.")
+        }
+
+        updater.updateLocalManifest(activeManifest)
+        return activeManifest // ALWAYS EXIT EARLY FOR EMPTY URL
+      }
+
+      if (startManifest || !zipExists || !modsExists) {
+        console.log(`[SYNC] Update or Repair needed. Target Version: ${activeManifest.version}`)
+        const tempZipPath = path.join(getMcRoot(), 'modpack_temp.zip')
+        browserWindow.webContents.send('status', 'Downloading Modpack...')
+
+        try {
+          const zipCacheBuster = `?t=${Date.now()}`
+          const finalUrl = downloadUrl.includes('?') ? `${downloadUrl}&${zipCacheBuster.substring(1)}` : `${downloadUrl}${zipCacheBuster}`
+
+          console.log(`[SYNC] Fetching from: ${finalUrl}`)
+          // Add a timeout for large zip
+          const controller = new AbortController()
+          const timeout = setTimeout(() => controller.abort(), 120000)
+
+          const res = await fetch(finalUrl, { signal: controller.signal })
+          clearTimeout(timeout)
+
+          if (!res.ok) throw new Error(`Unexpected response ${res.statusText}`)
+          if (!res.body) throw new Error('Response body is empty')
+
+          console.log(`[SYNC] Download started, piping to ${tempZipPath}`)
+          const fileStream = fs.createWriteStream(tempZipPath)
+
+          await new Promise<void>((resolve, reject) => {
+            if (!res.body) return reject(new Error('No body'))
+            res.body.pipe(fileStream)
+            res.body.on('error', (err) => { console.error("[SYNC] Stream error:", err); reject(err) })
+            fileStream.on('error', (err) => { console.error("[SYNC] File stream error:", err); reject(err) })
+            fileStream.on('finish', () => { console.log("[SYNC] Download finished."); resolve() })
+          })
+
+          browserWindow.webContents.send('status', 'Wiping existing modpack files...')
+
+          // If the Minecraft version itself changed, we also wipe 'versions'
+          const mcChanged = localManifest && activeManifest.minecraft !== localManifest.minecraft
+          if (mcChanged) {
+            console.log(`[SYNC] Minecraft version changed from ${localManifest.minecraft} to ${activeManifest.minecraft}. Nuclear wipe.`)
+          }
+
+          const keepList = ['libraries', 'assets', 'runtime', 'java', 'modpack-info.json', 'modpack.zip', 'modpack_temp.zip']
+          if (!mcChanged) keepList.push('versions')
+
+          const files = fs.readdirSync(getMcRoot())
+          for (const file of files) {
+            if (!keepList.includes(file)) {
+              const fullPath = path.join(getMcRoot(), file)
+              try { console.log(`Deep cleaning: Deleting ${file}`); fs.rmSync(fullPath, { recursive: true, force: true }) } catch (err) { }
+            }
+          }
+
+          // Delete old modpack.zip if exists
+          if (fs.existsSync(modpackZipPath)) {
+            console.log("Replacing modpack.zip")
+            fs.unlinkSync(modpackZipPath)
+          }
+
+          // Move temp file to final location
+          fs.renameSync(tempZipPath, modpackZipPath)
+
+          browserWindow.webContents.send('status', 'Extracting Modpack...')
+
+          try {
+            // Extract
+            const zip = new AdmZip(modpackZipPath)
+            zip.extractAllTo(getMcRoot(), true)
+            console.log("Modpack extraction completed successfully.")
+          } catch (zipErr) {
+            console.error("Extraction failed!", zipErr)
+            throw new Error("Modpack extraction failed: " + zipErr)
+          }
+
+          // Update local manifest 
+          if (activeManifest) {
+            updater.updateLocalManifest(activeManifest)
+          }
+
+          browserWindow.webContents.send('status', 'Modpack Installed.')
+
+        } catch (e: any) {
+          console.error("Download/Install failed:", e)
+          browserWindow.webContents.send('status', 'Download Failed: ' + e.message)
+          throw e
+        }
+      } else {
+        console.log("Modpack is up to date.")
+      }
+
+      return activeManifest
+    } finally {
+      syncPromise = null
+    }
+  })()
+
+  return syncPromise
+}
 
 
 // ----------------------------------------------------------------------
@@ -211,100 +409,20 @@ ipcMain.on('launch-game', async (_event, { username }) => {
   // ----------------------------------------------------------------------
   // UPDATE & DOWNLOAD LOGIC
   // ----------------------------------------------------------------------
-  // ----------------------------------------------------------------------
-  // UPDATE & DOWNLOAD LOGIC
-  // ----------------------------------------------------------------------
-  const updater = new UpdaterManager(win!, MC_ROOT)
-
-  // 1. Check App Updates (Async, don't block)
-  updater.checkForAppUpdates()
-
-  // 2. Check Modpack Updates
-  const startManifest = await updater.checkModpackUpdates() // Returns Manifest if update needed
-  const modpackZipPath = path.join(MC_ROOT, 'modpack.zip')
-
-  // Determine active manifest (New one if update, else local one)
-  let activeManifest = startManifest || updater.getLocalManifest()
-
-  // Fallback defaults if no local manifest exists yet
-  if (!activeManifest) {
-    activeManifest = {
-      version: "1.0.8",
-      minecraft: "1.21.8",
-      fabric: "0.18.4",
-      url: MODPACK_URL
-    }
+  let activeManifest: any;
+  try {
+    activeManifest = await syncModpack(win!)
+  } catch (e) {
+    return // Stop launch if sync fails
   }
 
   // Determine loader type from manifest
   const loaderType = activeManifest.fabric ? 'fabric' : (activeManifest.forge ? 'forge' : null)
   console.log(`Detected loader type: ${loaderType || 'vanilla'}`)
 
-  // If update needed OR zip doesn't exist (fresh install), download it
-  if (startManifest || !fs.existsSync(modpackZipPath)) {
-    const downloadUrl = (startManifest && startManifest.url) || activeManifest.url || MODPACK_URL
-    const tempZipPath = path.join(MC_ROOT, 'modpack_temp.zip')
-
-    win?.webContents.send('status', 'Downloading Modpack...')
-
-    try {
-      const res = await fetch(downloadUrl)
-      if (!res.ok) throw new Error(`Unexpected response ${res.statusText}`)
-      if (!res.body) throw new Error('Response body is empty')
-
-      // Download to temp file first
-      const fileStream = fs.createWriteStream(tempZipPath)
-
-      await new Promise<void>((resolve, reject) => {
-        if (!res.body) return reject(new Error('No body'))
-        res.body.pipe(fileStream)
-        res.body.on('error', reject)
-        fileStream.on('finish', () => resolve())
-      })
-
-      win?.webContents.send('status', 'Cleaning up old modpack files...')
-
-      // Delete old modpack folders before extracting new one
-      const foldersToClean = ['mods', 'config', 'resourcepacks', 'shaderpacks']
-      for (const folder of foldersToClean) {
-        const folderPath = path.join(MC_ROOT, folder)
-        if (fs.existsSync(folderPath)) {
-          fs.rmSync(folderPath, { recursive: true, force: true })
-          console.log(`Deleted old ${folder} folder`)
-        }
-      }
-
-      // Delete old modpack.zip if exists
-      if (fs.existsSync(modpackZipPath)) {
-        fs.unlinkSync(modpackZipPath)
-      }
-
-      // Move temp file to final location
-      fs.renameSync(tempZipPath, modpackZipPath)
-
-      win?.webContents.send('status', 'Extracting Modpack...')
-
-      // Extract
-      const zip = new AdmZip(modpackZipPath)
-      zip.extractAllTo(MC_ROOT, true)
-
-      // Update local manifest 
-      if (activeManifest) {
-        updater.updateLocalManifest(activeManifest)
-      }
-
-      win?.webContents.send('status', 'Modpack Installed.')
-
-    } catch (e: any) {
-      console.error(e)
-      win?.webContents.send('status', 'Download Failed: ' + e.message)
-      return // Stop launch
-    }
-  }
-
   // 2.5 Ensure Loader Installer Exists (Forge or Fabric)
   if (loaderType === 'forge' && activeManifest.forge) {
-    const forgeInstallerPath = path.join(MC_ROOT, 'forge-installer.jar')
+    const forgeInstallerPath = path.join(getMcRoot(), 'forge-installer.jar')
     if (!fs.existsSync(forgeInstallerPath)) {
       win?.webContents.send('status', 'Downloading Forge Installer...')
       try {
@@ -333,8 +451,8 @@ ipcMain.on('launch-game', async (_event, { username }) => {
     try {
       // Check if Fabric JSON already exists to skip installer (prevents network crash)
       const fabVersion = `fabric-loader-${activeManifest.fabric}-${activeManifest.minecraft}`
-      const jsonPath = path.join(MC_ROOT, 'versions', fabVersion, `${fabVersion}.json`)
-      const installerPath = path.join(MC_ROOT, 'fabric-installer.jar')
+      const jsonPath = path.join(getMcRoot(), 'versions', fabVersion, `${fabVersion}.json`)
+      const installerPath = path.join(getMcRoot(), 'fabric-installer.jar')
 
       if (!fs.existsSync(jsonPath)) {
         // Download installer if missing
@@ -359,11 +477,11 @@ ipcMain.on('launch-game', async (_event, { username }) => {
         }
 
         // Ensure Java is ready
-        const javaHandler = new JavaHandler(MC_ROOT)
+        const javaHandler = new JavaHandler(getMcRoot())
         const javaPath = await javaHandler.ensureJava()
 
         // Run Installer
-        const installCmd = `"${javaPath}" -jar "${installerPath}" client -dir "${MC_ROOT}" -mcversion ${activeManifest.minecraft} -loader ${activeManifest.fabric} -noprofile`
+        const installCmd = `"${javaPath}" -jar "${installerPath}" client -dir "${getMcRoot()}" -mcversion ${activeManifest.minecraft} -loader ${activeManifest.fabric} -noprofile`
         console.log('Running Fabric Installer:', installCmd)
 
         const { exec } = require('child_process')
@@ -380,11 +498,22 @@ ipcMain.on('launch-game', async (_event, { username }) => {
         })
       }
 
-      // 2.7 Ensure the PARENT version JSON (1.21.8) exists and is patched
-      // This is crucial because Fabric inherits from it, and MCLC might fail to resolve it if missing.
+      // 2.7 Ensure the PARENT version JSON exists and is valid
       const parentVersion = activeManifest.minecraft
-      const parentDir = path.join(MC_ROOT, 'versions', parentVersion)
+      const parentDir = path.join(getMcRoot(), 'versions', parentVersion)
       const parentJsonPath = path.join(parentDir, `${parentVersion}.json`)
+
+      if (fs.existsSync(parentJsonPath)) {
+        try {
+          let parentContent = JSON.parse(fs.readFileSync(parentJsonPath, 'utf-8'))
+          if (parentContent.id !== parentVersion) {
+            console.log(`[LAUNCHER] Metadata ID mismatch! Found ${parentContent.id}, expected ${parentVersion}. Deleting metadata...`)
+            fs.unlinkSync(parentJsonPath)
+          }
+        } catch (e) {
+          console.error("Parent metadata verification error", e)
+        }
+      }
 
       if (!fs.existsSync(parentJsonPath)) {
         win?.webContents.send('status', `Downloading base version metadata (${parentVersion})...`)
@@ -400,7 +529,7 @@ ipcMain.on('launch-game', async (_event, { username }) => {
               if (versionRes.ok) {
                 const versionJson: any = await versionRes.json()
                 fs.writeFileSync(parentJsonPath, JSON.stringify(versionJson, null, 2))
-                console.log(`Manually installed official metadata for ${parentVersion}`)
+                console.log(`[LAUNCHER] Fetched official metadata for ${parentVersion}`)
               }
             }
           }
@@ -409,58 +538,27 @@ ipcMain.on('launch-game', async (_event, { username }) => {
         }
       }
 
+      // Verify and Patch Game JAR
       if (fs.existsSync(parentJsonPath)) {
         try {
           let parentContent = JSON.parse(fs.readFileSync(parentJsonPath, 'utf-8'))
-          let saveParent = false;
-
-          // 1. Ensure 'downloads.client' matches LOCAL file SHA1
-          if (!parentContent.downloads) parentContent.downloads = {}
-
           const localJarPath = path.join(parentDir, `${parentVersion}.jar`)
-          if (fs.existsSync(localJarPath)) {
+
+          // Verify SHA1 against official metadata
+          if (fs.existsSync(localJarPath) && parentContent.downloads?.client?.sha1) {
             const buffer = fs.readFileSync(localJarPath)
-            const hash = crypto.createHash('sha1').update(buffer).digest('hex')
+            const localHash = crypto.createHash('sha1').update(buffer).digest('hex')
+            const officialHash = parentContent.downloads.client.sha1
 
-            if (!parentContent.downloads.client || parentContent.downloads.client.sha1 !== hash) {
-              parentContent.downloads.client = {
-                url: parentContent.downloads.client?.url || "https://piston-meta.mojang.com/v1/objects/a19d9badbea944a4369fd0059e53bf7286597576/client.jar",
-                sha1: hash,
-                size: fs.statSync(localJarPath).size
-              }
-              saveParent = true
-              console.log("Patched Parent JSON downloads.client with local SHA1")
+            if (localHash !== officialHash) {
+              console.log(`[LAUNCHER] Version mismatch! Local JAR is ${localHash}, expected ${officialHash}. Deleting...`)
+              fs.unlinkSync(localJarPath)
+            } else {
+              console.log(`[LAUNCHER] Game JAR verified for ${parentVersion}`)
             }
-          } else {
-            // If JAR is missing, ensure the URL is valid so MCLC can download it
-            if (!parentContent.downloads.client || !parentContent.downloads.client.url) {
-              parentContent.downloads.client = {
-                url: `https://piston-data.mojang.com/v1/objects/a19d9badbea944a4369fd0059e53bf7286597576/client.jar`,
-                sha1: "a19d9badbea944a4369fd0059e53bf7286597576",
-                size: 29525242
-              }
-              saveParent = true
-            }
-          }
-
-          // 2. Ensure 'assetIndex' exists and is correct for 1.21.8
-          if (!parentContent.assetIndex || parentContent.assetIndex.id === "19") {
-            parentContent.assetIndex = {
-              id: "26",
-              sha1: "049a3e050c815d484afb2773cb3df18af4f264a5",
-              size: 491076,
-              totalSize: 436719737,
-              url: "https://piston-meta.mojang.com/v1/packages/049a3e050c815d484afb2773cb3df18af4f264a5/26.json"
-            }
-            saveParent = true
-            console.log("Injected Official 1.21.8 Asset Index")
-          }
-
-          if (saveParent) {
-            fs.writeFileSync(parentJsonPath, JSON.stringify(parentContent, null, 2))
           }
         } catch (e) {
-          console.error("Parent patch error", e)
+          console.error("Game JAR verification error", e)
         }
       }
 
@@ -580,7 +678,7 @@ ipcMain.on('launch-game', async (_event, { username }) => {
           }
 
           // 5. Mirror the JAR file to the Fabric folder
-          const expectedFabricJar = path.join(MC_ROOT, 'versions', fabVersion, `${fabVersion}.jar`)
+          const expectedFabricJar = path.join(getMcRoot(), 'versions', fabVersion, `${fabVersion}.jar`)
           const sourceJarPath = path.join(parentDir, `${parentVersion}.jar`)
 
           if (!fs.existsSync(expectedFabricJar) && fs.existsSync(sourceJarPath)) {
@@ -603,7 +701,7 @@ ipcMain.on('launch-game', async (_event, { username }) => {
   // 3. Launch
 
   // Ensure Java 17
-  const javaHandler = new JavaHandler(MC_ROOT)
+  const javaHandler = new JavaHandler(getMcRoot())
   let javaPath = 'java' // Default to system java if check fails, but we expect check to work
   try {
     win?.webContents.send('status', 'Checking Java Runtime...')
@@ -619,7 +717,7 @@ ipcMain.on('launch-game', async (_event, { username }) => {
   let forgeConfig: string | undefined = undefined
 
   if (loaderType === 'forge' && activeManifest.forge) {
-    forgeConfig = path.join(MC_ROOT, 'forge-installer.jar')
+    forgeConfig = path.join(getMcRoot(), 'forge-installer.jar')
     loaderConfig = {
       type: "forge",
       version: `${activeManifest.minecraft}-${activeManifest.forge}`
@@ -638,7 +736,7 @@ ipcMain.on('launch-game', async (_event, { username }) => {
   const opts = {
     // clientPackage: null, // Removed duplicate
     authorization: auth,
-    root: MC_ROOT,
+    root: getMcRoot(),
     javaPath: javaPath,
     version: {
       number: customVersion,
