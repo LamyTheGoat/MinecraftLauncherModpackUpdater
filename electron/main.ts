@@ -307,6 +307,28 @@ ipcMain.on('launch-game', async (_event, { username }) => {
         })
       })
 
+      // Patch the generated JSON to prevent MCLC crash ("reading 'client'")
+      const fabVersion = `fabric-loader-${activeManifest.fabric}-${activeManifest.minecraft}`
+      const jsonPath = path.join(MC_ROOT, 'versions', fabVersion, `${fabVersion}.json`)
+
+      if (fs.existsSync(jsonPath)) {
+        const jsonContent = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'))
+        if (!jsonContent.downloads) {
+          jsonContent.downloads = {}
+        }
+        if (!jsonContent.downloads.client) {
+          // Inject dummy client to satisfy MCLC checks. 
+          // Inheritance means it uses the parent jar, but MCLC 3.18 check might be strict on the child JSON.
+          jsonContent.downloads.client = {
+            url: "https://invalid.url/dummy-client.jar",
+            sha1: "0000000000000000000000000000000000000000",
+            size: 0
+          }
+        }
+        fs.writeFileSync(jsonPath, JSON.stringify(jsonContent, null, 2))
+        console.log(`Patched Fabric JSON at ${jsonPath}`)
+      }
+
       win?.webContents.send('status', 'Fabric Installed.')
 
     } catch (e: any) {
