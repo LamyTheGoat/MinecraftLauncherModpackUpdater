@@ -29,6 +29,7 @@ function App(): JSX.Element {
       if (user) {
         setUsername(user.name)
         setView('LAUNCHER')
+        console.log("Found saved profile:", user)
       }
     })
 
@@ -124,6 +125,22 @@ function App(): JSX.Element {
               Identity: <span style={{ color: (status.includes('Offline') || !status.includes('Logged in')) ? '#ffcc00' : '#00ff88' }}>
                 {(status.includes('Offline') || !status.includes('Logged in')) ? 'Unprotected (Offline)' : 'Protected (Microsoft)'}
               </span>
+            </div>
+
+            <div style={{
+              fontSize: '10px',
+              fontFamily: 'monospace',
+              background: 'rgba(0,0,0,0.4)',
+              padding: '8px',
+              borderRadius: '6px',
+              marginTop: '10px',
+              color: '#bbb',
+              border: '1px solid rgba(255,255,255,0.1)',
+              textAlign: 'left'
+            }}>
+              <div style={{ color: 'var(--primary)', fontWeight: 'bold', marginBottom: '4px' }}>DEBUG IDENTITY:</div>
+              <div>NAME: {username}</div>
+              <div>TYPE: {status.includes('Offline') || !status.includes('Logged in') ? 'OFFLINE' : 'MICROSOFT'}</div>
             </div>
 
             <button className="btn" onClick={handleLaunch}>
