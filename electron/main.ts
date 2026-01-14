@@ -128,6 +128,11 @@ ipcMain.handle('login-microsoft', async () => {
   }
 })
 
+ipcMain.handle('logout', async () => {
+  store.delete('mc_profile')
+  return { success: true }
+})
+
 // 3. Launch Game
 ipcMain.on('launch-game', async (_event, { username }) => {
   const launcher = new Client()

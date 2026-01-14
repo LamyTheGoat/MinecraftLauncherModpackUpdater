@@ -52,6 +52,13 @@ function App(): JSX.Element {
     }
   }
 
+  const handleLogout = async () => {
+    await window.ipcRenderer.invoke('logout')
+    setUsername('Player')
+    setView('LOGIN')
+    setStatus('Logged out')
+  }
+
   const handleOfflineLogin = () => {
     if (!username) return
     setView('LAUNCHER')
@@ -120,6 +127,9 @@ function App(): JSX.Element {
 
             <button className="btn" onClick={handleLaunch}>
               LAUNCH MODPACK
+            </button>
+            <button className="btn btn-secondary" onClick={handleLogout} style={{ marginTop: '10px' }}>
+              Switch Account / Logout
             </button>
           </div>
         )}
