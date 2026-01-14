@@ -22,27 +22,25 @@ export class JavaHandler {
         const platform = os.platform()
         const arch = os.arch()
 
-        // 1. Determine executable path based on OS
-        let javaExec = ''
-        if (platform === 'win32') {
-            javaExec = path.join(this.runtimeDir, 'bin', 'java.exe')
-        } else if (platform === 'darwin') {
-            javaExec = path.join(this.runtimeDir, 'Contents', 'Home', 'bin', 'java')
-        } else { // linux
-            javaExec = path.join(this.runtimeDir, 'bin', 'java')
+        // 1. Check if we already have a valid Java executable in the runtime directory
+        if (fs.existsSync(this.runtimeDir)) {
+            const existingJava = this.findJavaExec(this.runtimeDir, platform)
+            if (existingJava) {
+                console.log(`Found existing Java at ${existingJava}`)
+                return existingJava
+            }
         }
 
-        // 2. Check if exists and is valid (simple existence check for now)
-        if (this.isValid(javaExec)) {
-            return javaExec
-        }
-
-        // 3. Download if missing
-        console.log(`Java 17 not found at ${javaExec}. Downloading...`)
+        // 2. Download if missing
+        console.log(`Java 17 not found in ${this.runtimeDir}. Downloading...`)
 
         // Clean up old dir if exists
         if (fs.existsSync(this.runtimeDir)) {
-            fs.rmSync(this.runtimeDir, { recursive: true, force: true })
+            try {
+                fs.rmSync(this.runtimeDir, { recursive: true, force: true })
+            } catch (e) {
+                console.error("Failed to clean runtime dir", e)
+            }
         }
         fs.mkdirSync(this.runtimeDir, { recursive: true })
 
@@ -60,16 +58,11 @@ export class JavaHandler {
         await this.extractArchive(archivePath, this.runtimeDir, platform)
 
         // Cleanup zip/tar
-        fs.unlinkSync(archivePath)
-
-        // Verify again
-        // Note: Extraction often creates a top-level directory (e.g. jdk-17.0.1/...)
-        // We might need to handle strip-components or find the directory.
-        // Adoptium usually has a top folder. Let's find it and verify path.
-
-        // const children = fs.readdirSync(this.runtimeDir)
-        // If there is only one child and it's a directory, move content up or Adjust path?
-        // Easier: Find the java executable dynamically inside the extracted structure.
+        try {
+            fs.unlinkSync(archivePath)
+        } catch (e) {
+            console.warn("Failed to delete archive", e)
+        }
 
         const realExecPath = this.findJavaExec(this.runtimeDir, platform)
         if (!realExecPath) throw new Error("Java executable not found after extraction")
@@ -82,9 +75,7 @@ export class JavaHandler {
         return realExecPath
     }
 
-    private isValid(execPath: string): boolean {
-        return fs.existsSync(execPath)
-    }
+
 
     private findJavaExec(baseDir: string, platform: string): string | null {
         // Recursive search for bin/java or bin/java.exe
