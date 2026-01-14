@@ -112,8 +112,10 @@ function App(): JSX.Element {
               />
             </div>
 
-            <div style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>
-              Server Status: <span style={{ color: '#00ff88' }}>ONLINE</span>
+            <div style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '12px' }}>
+              Identity: <span style={{ color: (status.includes('Offline') || !status.includes('Logged in')) ? '#ffcc00' : '#00ff88' }}>
+                {(status.includes('Offline') || !status.includes('Logged in')) ? 'Unprotected (Offline)' : 'Protected (Microsoft)'}
+              </span>
             </div>
 
             <button className="btn" onClick={handleLaunch}>

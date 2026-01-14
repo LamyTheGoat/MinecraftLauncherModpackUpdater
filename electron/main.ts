@@ -104,12 +104,20 @@ ipcMain.handle('login-microsoft', async () => {
     const xboxManager = await authManager.launch("electron")
     const token = await xboxManager.getMinecraft()
 
+    // Unified Client Token for consistency
+    let clientToken: string = store.get('client_token') as string
+    if (!clientToken) {
+      clientToken = crypto.randomBytes(16).toString('hex')
+      store.set('client_token', clientToken)
+    }
+
     const profile = {
       name: token.mclc().name,
       uuid: token.mclc().uuid,
       access_token: token.mclc().access_token,
+      client_token: clientToken, // Use unified token
       user_properties: token.mclc().user_properties,
-      meta: token.mclc().meta // msmc specific
+      meta: { ...token.mclc().meta, type: 'msa' }
     }
 
     store.set('mc_profile', profile)
@@ -147,15 +155,11 @@ ipcMain.on('launch-game', async (_event, { username }) => {
     const hex = hash.toString('hex')
     const uuid = `${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20, 32)}`
 
-    // Use the same UUID as the access_token for simplicity and uniqueness
-    const accessToken = hex
+    // Deterministic Access Token based on username
+    const accessToken = crypto.createHash('sha1').update(`Access:${username}:salt123`).digest('hex')
 
-    // Client token should be unique to the installation to avoid session conflicts
-    let clientToken: string = store.get('client_token') as string
-    if (!clientToken) {
-      clientToken = crypto.randomBytes(16).toString('hex')
-      store.set('client_token', clientToken)
-    }
+    // Deterministic Client Token based on username (unique to user, but static)
+    const clientToken = crypto.createHash('sha1').update(`Client:${username}:salt456`).digest('hex')
 
     return {
       access_token: accessToken,
@@ -171,11 +175,20 @@ ipcMain.on('launch-game', async (_event, { username }) => {
   // If saved profile matches requested username (or if we just use saved profile for Online mode)
   if (savedProfile && savedProfile.name === username) {
     auth = savedProfile
+    const type = (auth.meta as any)?.type || 'offline'
+    console.log(`Using SAVED AUTH for ${username} (${type === 'offline' ? 'Offline' : 'Microsoft'})`)
   } else {
     // Use Deterministic Offline Auth instead of MCLC's random one
     auth = getOfflineAuth(username)
-    console.log(`Generated deterministic offline auth for ${username}: ${auth.uuid}`)
+    console.log(`Using DETERMINISTIC OFFLINE AUTH for ${username}: ${auth.uuid}`)
   }
+
+  console.log("FINAL AUTH CONFIG:", {
+    name: auth.name,
+    uuid: auth.uuid,
+    authType: (auth.meta as any)?.type || 'offline',
+    clientToken: auth.client_token
+  })
 
   // ----------------------------------------------------------------------
   // UPDATE & DOWNLOAD LOGIC
