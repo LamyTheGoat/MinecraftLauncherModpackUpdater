@@ -200,6 +200,14 @@ ipcMain.on('launch-game', async (_event, { username }) => {
     clientToken: auth.client_token
   })
 
+  // Send back to renderer for the DEBUG IDENTITY box
+  win?.webContents.send('auth-debug', {
+    name: auth.name,
+    uuid: auth.uuid,
+    type: (auth.meta as any)?.type || 'offline',
+    clientToken: auth.client_token?.substring(0, 8)
+  })
+
   // ----------------------------------------------------------------------
   // UPDATE & DOWNLOAD LOGIC
   // ----------------------------------------------------------------------

@@ -71,6 +71,14 @@ function App(): JSX.Element {
     window.ipcRenderer.send('launch-game', { username })
   }
 
+  // Effect to sync debug info from main process
+  useEffect(() => {
+    const removeListener = window.ipcRenderer.on('auth-debug', (_event, debugInfo) => {
+      setStatus((prev) => `${prev} UUID:${debugInfo.uuid}`)
+    })
+    return () => removeListener()
+  }, [])
+
   return (
     <>
       <div className="title-bar">MC Launcher Gake [v1.0.0]</div>
@@ -140,7 +148,11 @@ function App(): JSX.Element {
             }}>
               <div style={{ color: 'var(--primary)', fontWeight: 'bold', marginBottom: '4px' }}>DEBUG IDENTITY:</div>
               <div>NAME: {username}</div>
-              <div>TYPE: {status.includes('Offline') || !status.includes('Logged in') ? 'OFFLINE' : 'MICROSOFT'}</div>
+              <div>AUTH: {status.includes('Offline') || !status.includes('Logged in') ? 'OFFLINE' : 'MICROSOFT'}</div>
+              <div style={{ marginTop: '5px' }}>
+                <div style={{ fontSize: '8px', opacity: 0.6 }}>UUID:</div>
+                <div style={{ fontSize: '9px', wordBreak: 'break-all' }}>{status.split('UUID:')[1]?.split(' ')[0] || 'Pending...'}</div>
+              </div>
             </div>
 
             <button className="btn" onClick={handleLaunch}>
