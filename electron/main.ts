@@ -17,6 +17,7 @@ const msmc = require('msmc')
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 // App Data Path for Minecraft
+
 const MC_ROOT = path.join(app.getPath('userData'), 'minecraft_instance')
 if (!fs.existsSync(MC_ROOT)) fs.mkdirSync(MC_ROOT, { recursive: true })
 
@@ -314,10 +315,34 @@ ipcMain.on('launch-game', async (_event, { username }) => {
         })
       }
 
-      // Patch the PARENT JSON (1.21.8) to ensure it has valid downloads/assets
-      // This is crucial because Fabric inherits from it.
+      // 2.7 Ensure the PARENT version JSON (1.21.8) exists and is patched
+      // This is crucial because Fabric inherits from it, and MCLC might fail to resolve it if missing.
       const parentVersion = activeManifest.minecraft
-      const parentJsonPath = path.join(MC_ROOT, 'versions', parentVersion, `${parentVersion}.json`)
+      const parentDir = path.join(MC_ROOT, 'versions', parentVersion)
+      const parentJsonPath = path.join(parentDir, `${parentVersion}.json`)
+
+      if (!fs.existsSync(parentJsonPath)) {
+        win?.webContents.send('status', `Downloading base version metadata (${parentVersion})...`)
+        try {
+          if (!fs.existsSync(parentDir)) fs.mkdirSync(parentDir, { recursive: true })
+
+          const manifestRes = await fetch('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json')
+          if (manifestRes.ok) {
+            const manifest: any = await manifestRes.json()
+            const versionEntry = manifest.versions.find((v: any) => v.id === parentVersion)
+            if (versionEntry) {
+              const versionRes = await fetch(versionEntry.url)
+              if (versionRes.ok) {
+                const versionJson: any = await versionRes.json()
+                fs.writeFileSync(parentJsonPath, JSON.stringify(versionJson, null, 2))
+                console.log(`Manually installed official metadata for ${parentVersion}`)
+              }
+            }
+          }
+        } catch (e) {
+          console.error("Failed to fetch parent metadata", e)
+        }
+      }
 
       if (fs.existsSync(parentJsonPath)) {
         try {
@@ -327,57 +352,43 @@ ipcMain.on('launch-game', async (_event, { username }) => {
           // 1. Ensure 'downloads.client' matches LOCAL file SHA1
           if (!parentContent.downloads) parentContent.downloads = {}
 
-          const localJarPath = path.join(MC_ROOT, 'versions', parentVersion, `${parentVersion}.jar`)
+          const localJarPath = path.join(parentDir, `${parentVersion}.jar`)
           if (fs.existsSync(localJarPath)) {
             const buffer = fs.readFileSync(localJarPath)
             const hash = crypto.createHash('sha1').update(buffer).digest('hex')
 
-            // If missing or SHA1 mismatch, force update to local hash so MCLC trusts it
-            // We provide a dummy URL because if SHA1 matches, it won't download.
             if (!parentContent.downloads.client || parentContent.downloads.client.sha1 !== hash) {
               parentContent.downloads.client = {
-                url: "https://piston-data.mojang.com/v1/objects/dummy/client.jar",
+                url: parentContent.downloads.client?.url || "https://piston-meta.mojang.com/v1/objects/a19d9badbea944a4369fd0059e53bf7286597576/client.jar",
                 sha1: hash,
                 size: fs.statSync(localJarPath).size
               }
               saveParent = true
               console.log("Patched Parent JSON downloads.client with local SHA1")
             }
-          }
-
-          // 2. Ensure 'assetIndex' exists
-          if (!parentContent.assetIndex) {
-            // Try to fetch, or use hardcoded fallback for 1.21
-            try {
-              const manifestRes = await fetch('https://piston-meta.mojang.com/mc/game/version_manifest_v2.json')
-              if (manifestRes.ok) {
-                const manifest: any = await manifestRes.json()
-                const latest = manifest.versions.find((v: any) => v.id === '1.21.4')
-                if (latest) {
-                  const versionRes = await fetch(latest.url)
-                  if (versionRes.ok) {
-                    const versionJson: any = await versionRes.json()
-                    parentContent.assetIndex = versionJson.assetIndex
-                    saveParent = true
-                  }
-                }
-              }
-            } catch (e) {
-              console.log("Fetch failed, using hardcoded fallback")
-            }
-
-            // Fallback if still missing (Hardcoded 1.21 asset index to prevent crash)
-            if (!parentContent.assetIndex) {
-              parentContent.assetIndex = {
-                id: "17",
-                sha1: "bf92b3783994f3162799c55d04523316688d4072",
-                size: 686733,
-                totalSize: 1339908852,
-                url: "https://piston-meta.mojang.com/v1/packages/bf92b3783994f3162799c55d04523316688d4072/17.json"
+          } else {
+            // If JAR is missing, ensure the URL is valid so MCLC can download it
+            if (!parentContent.downloads.client || !parentContent.downloads.client.url) {
+              parentContent.downloads.client = {
+                url: `https://piston-data.mojang.com/v1/objects/a19d9badbea944a4369fd0059e53bf7286597576/client.jar`,
+                sha1: "a19d9badbea944a4369fd0059e53bf7286597576",
+                size: 29525242
               }
               saveParent = true
-              console.log("Injected Hardcoded Asset Index")
             }
+          }
+
+          // 2. Ensure 'assetIndex' exists and is correct for 1.21.8
+          if (!parentContent.assetIndex || parentContent.assetIndex.id === "19") {
+            parentContent.assetIndex = {
+              id: "26",
+              sha1: "049a3e050c815d484afb2773cb3df18af4f264a5",
+              size: 491076,
+              totalSize: 436719737,
+              url: "https://piston-meta.mojang.com/v1/packages/049a3e050c815d484afb2773cb3df18af4f264a5/26.json"
+            }
+            saveParent = true
+            console.log("Injected Official 1.21.8 Asset Index")
           }
 
           if (saveParent) {
@@ -388,24 +399,136 @@ ipcMain.on('launch-game', async (_event, { username }) => {
         }
       }
 
-      // Patch the Fabric JSON - ONLY for assets override if needed, DO NOT touch downloads
-      if (fs.existsSync(jsonPath)) {
-        let jsonContent = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'))
-        let save = false;
+      // Patch the Fabric JSON - Standalone Merge Strategy
+      // This merges parent (Minecraft) into child (Fabric) to fix Classpath issues (ClassNotFoundException)
+      if (fs.existsSync(jsonPath) && fs.existsSync(parentJsonPath)) {
+        try {
+          let jsonContent = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'))
+          let parentContent = JSON.parse(fs.readFileSync(parentJsonPath, 'utf-8'))
+          let saveChild = false
 
-        // Ensure downloads is EMPTY or missing client, so it inherits from parent
-        if (jsonContent.downloads && jsonContent.downloads.client) {
-          delete jsonContent.downloads.client;
-          save = true;
-          console.log("Removed downloads.client from Fabric JSON to force inheritance")
-        }
+          console.log(`Starting deep merge for ${fabVersion} (Standalone mode)`)
 
-        if (save) {
-          fs.writeFileSync(jsonPath, JSON.stringify(jsonContent, null, 2))
+          // 1. Merge Libraries (with aggressive deduplication)
+          const getArtifactBase = (name: string) => {
+            const parts = name.split(':')
+            // name format: group:artifact:version[:classifier]
+            // We want to deduplicate by group:artifact, but KEEP different classifiers (natives)
+            if (parts.length >= 4) {
+              return `${parts[0]}:${parts[1]}:${parts[3]}` // Includes classifier
+            }
+            return parts.length >= 2 ? `${parts[0]}:${parts[1]}` : name
+          }
+
+          const libMap = new Map<string, any>()
+
+          // Fabric libraries (added first, they take priority)
+          if (jsonContent.libraries) {
+            for (const lib of jsonContent.libraries) {
+              const artBase = getArtifactBase(lib.name)
+              if (!libMap.has(artBase)) {
+                libMap.set(artBase, lib)
+              } else {
+                // If already duplicate, prioritize higher version or just keep the first one found (Fabric)
+                console.log(`Found existing duplicate in child: ${lib.name}, keeping current one.`)
+              }
+            }
+          }
+
+          // Parent libraries (only added if missing)
+          const initialChildLibCount = libMap.size
+          if (parentContent.libraries) {
+            for (const lib of parentContent.libraries) {
+              const artBase = getArtifactBase(lib.name)
+              if (!libMap.has(artBase)) {
+                libMap.set(artBase, lib)
+              } else {
+                console.log(`Skipping parent library ${lib.name} because ${artBase} is already provided by child.`)
+              }
+            }
+          }
+
+          if (libMap.size !== initialChildLibCount || (jsonContent.libraries && jsonContent.libraries.length !== libMap.size)) {
+            jsonContent.libraries = Array.from(libMap.values())
+            saveChild = true
+            console.log(`Merged and deduplicated libraries: ${jsonContent.libraries.length} total.`)
+          }
+
+          // 2. Merge Arguments (JVM and Game)
+          if (parentContent.arguments) {
+            if (!jsonContent.arguments) jsonContent.arguments = { game: [], jvm: [] }
+
+            // Merge Game args
+            const gameArgsSet = new Set(jsonContent.arguments.game.filter((a: any) => typeof a === 'string'))
+            if (parentContent.arguments.game) {
+              for (const arg of parentContent.arguments.game) {
+                if (typeof arg === 'string' && !gameArgsSet.has(arg)) {
+                  jsonContent.arguments.game.push(arg)
+                  saveChild = true
+                } else if (typeof arg === 'object') {
+                  jsonContent.arguments.game.push(arg) // Complex rules, just add them
+                  saveChild = true
+                }
+              }
+            }
+
+            // Merge JVM args
+            const jvmArgsSet = new Set(jsonContent.arguments.jvm.filter((a: any) => typeof a === 'string'))
+            if (parentContent.arguments.jvm) {
+              for (const arg of parentContent.arguments.jvm) {
+                if (typeof arg === 'string' && !jvmArgsSet.has(arg)) {
+                  jsonContent.arguments.jvm.push(arg)
+                  saveChild = true
+                } else if (typeof arg === 'object') {
+                  jsonContent.arguments.jvm.push(arg)
+                  saveChild = true
+                }
+              }
+            }
+          }
+
+          // 3. Copy essential fields if missing
+          if (!jsonContent.downloads || Object.keys(jsonContent.downloads).length === 0) {
+            jsonContent.downloads = parentContent.downloads
+            saveChild = true
+          }
+
+          if (!jsonContent.assetIndex) {
+            jsonContent.assetIndex = parentContent.assetIndex
+            saveChild = true
+          }
+
+          if (!jsonContent.mainClass && parentContent.mainClass) {
+            // Keep Fabric mainClass, but if somehow missing, fall back
+          }
+
+          // 4. Optionally clear inheritsFrom to make it truly standalone
+          // This forces MCLC to stop trying to merge and just trust our JSON.
+          if (jsonContent.inheritsFrom) {
+            delete jsonContent.inheritsFrom
+            saveChild = true
+            console.log("Removed inheritsFrom to force standalone resolution")
+          }
+
+          if (saveChild) {
+            fs.writeFileSync(jsonPath, JSON.stringify(jsonContent, null, 2))
+          }
+
+          // 5. Mirror the JAR file to the Fabric folder
+          const expectedFabricJar = path.join(MC_ROOT, 'versions', fabVersion, `${fabVersion}.jar`)
+          const sourceJarPath = path.join(parentDir, `${parentVersion}.jar`)
+
+          if (!fs.existsSync(expectedFabricJar) && fs.existsSync(sourceJarPath)) {
+            fs.copyFileSync(sourceJarPath, expectedFabricJar)
+            console.log("Mirrored Minecraft JAR to Fabric folder")
+          }
+        } catch (e) {
+          console.error("Fabric JSON standalone merge error", e)
         }
       }
 
       win?.webContents.send('status', 'Fabric Installed.')
+
     } catch (e: any) {
       console.error("Fabric Install Error", e)
       win?.webContents.send('status', 'Fabric Install Failed: ' + e.message)
