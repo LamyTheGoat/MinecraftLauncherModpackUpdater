@@ -261,9 +261,58 @@ ipcMain.on('launch-game', async (_event, { username }) => {
       }
     }
   } else if (loaderType === 'fabric' && activeManifest.fabric) {
-    // Fabric uses a different approach - MCLC can handle Fabric natively
-    win?.webContents.send('status', 'Preparing Fabric Loader...')
-    console.log(`Using Fabric loader version: ${activeManifest.fabric}`)
+    // Manual Fabric Installation
+    win?.webContents.send('status', 'Installing Fabric Loader...')
+    try {
+      const installerPath = path.join(MC_ROOT, 'fabric-installer.jar')
+      // Download installer if missing
+      if (!fs.existsSync(installerPath)) {
+        // Fetch latest installer version
+        const metaRes = await fetch('https://meta.fabricmc.net/v2/versions/installer')
+        if (!metaRes.ok) throw new Error('Failed to fetch fabric installer meta')
+        const meta: any = await metaRes.json()
+        const installerUrl = meta[0].url
+
+        const res = await fetch(installerUrl)
+        if (!res.ok) throw new Error('Failed to download fabric installer')
+
+        const fileStream = fs.createWriteStream(installerPath)
+        await new Promise<void>((resolve, reject) => {
+          if (!res.body) return reject(new Error('No body'))
+          res.body.pipe(fileStream)
+          res.body.on('error', reject)
+          fileStream.on('finish', () => resolve())
+        })
+      }
+
+      // Ensure Java is ready
+      const javaHandler = new JavaHandler(MC_ROOT)
+      const javaPath = await javaHandler.ensureJava()
+
+      // Run Installer
+      // java -jar installer.jar client -dir "..." -mcversion ... -loader ... -noprofile
+      const installCmd = `"${javaPath}" -jar "${installerPath}" client -dir "${MC_ROOT}" -mcversion ${activeManifest.minecraft} -loader ${activeManifest.fabric} -noprofile`
+      console.log('Running Fabric Installer:', installCmd)
+
+      const { exec } = require('child_process')
+      await new Promise<void>((resolve, reject) => {
+        exec(installCmd, (err: any, stdout: any, stderr: any) => {
+          if (err) {
+            console.error(stderr)
+            reject(err)
+          } else {
+            console.log(stdout)
+            resolve()
+          }
+        })
+      })
+
+      win?.webContents.send('status', 'Fabric Installed.')
+
+    } catch (e: any) {
+      console.error("Fabric Install Error", e)
+      win?.webContents.send('status', 'Fabric Install Failed: ' + e.message)
+    }
   }
 
   // 3. Launch
@@ -291,11 +340,15 @@ ipcMain.on('launch-game', async (_event, { username }) => {
       version: `${activeManifest.minecraft}-${activeManifest.forge}`
     }
   } else if (loaderType === 'fabric' && activeManifest.fabric) {
-    loaderConfig = {
-      type: "fabric",
-      version: activeManifest.fabric
-    }
+    // For Fabric, we manually installed it, so we target the version directly
+    // Format: fabric-loader-{loader_version}-{game_version}
+    loaderConfig = undefined // Do NOT let MCLC try to install it again
   }
+
+  // Custom version override for Fabric
+  const customVersion = (loaderType === 'fabric')
+    ? `fabric-loader-${activeManifest.fabric}-${activeManifest.minecraft}`
+    : activeManifest.minecraft
 
   const opts = {
     clientPackage: null,
@@ -303,8 +356,9 @@ ipcMain.on('launch-game', async (_event, { username }) => {
     root: MC_ROOT,
     javaPath: javaPath,
     version: {
-      number: activeManifest.minecraft,
-      type: "release"
+      number: customVersion,
+      type: "release",
+      custom: (loaderType === 'fabric') ? customVersion : undefined
     },
     memory: {
       max: "4G",
