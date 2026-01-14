@@ -130,6 +130,8 @@ ipcMain.handle('login-microsoft', async () => {
 
 ipcMain.handle('logout', async () => {
   store.delete('mc_profile')
+  store.delete('client_token') // Clear machine identity to avoid being "stuck"
+  console.log("Identity hard reset performed.")
   return { success: true }
 })
 

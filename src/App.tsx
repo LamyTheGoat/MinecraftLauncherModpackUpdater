@@ -119,7 +119,8 @@ function App(): JSX.Element {
               />
             </div>
 
-            <div style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '12px' }}>
+            <div style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '11px', marginTop: '5px' }}>
+              <div style={{ opacity: 0.6 }}>Static Token: ACTIVE</div>
               Identity: <span style={{ color: (status.includes('Offline') || !status.includes('Logged in')) ? '#ffcc00' : '#00ff88' }}>
                 {(status.includes('Offline') || !status.includes('Logged in')) ? 'Unprotected (Offline)' : 'Protected (Microsoft)'}
               </span>
@@ -129,7 +130,7 @@ function App(): JSX.Element {
               LAUNCH MODPACK
             </button>
             <button className="btn btn-secondary" onClick={handleLogout} style={{ marginTop: '10px' }}>
-              Switch Account / Logout
+              Hard Reset / Switch Account
             </button>
           </div>
         )}
