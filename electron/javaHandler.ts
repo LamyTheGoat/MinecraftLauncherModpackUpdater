@@ -15,10 +15,10 @@ export class JavaHandler {
 
     constructor(dataRoot: string) {
         this.rootDir = dataRoot
-        this.runtimeDir = path.join(dataRoot, 'runtime', 'java17')
+        this.runtimeDir = path.join(dataRoot, 'runtime', 'java21')
     }
 
-    async ensureJava17(): Promise<string> {
+    async ensureJava(): Promise<string> {
         const platform = os.platform()
         const arch = os.arch()
 
@@ -107,8 +107,8 @@ export class JavaHandler {
 
     private getDownloadUrl(platform: string, arch: string): string | null {
         // Adoptium API or direct links
-        // Using generic 'latest' API for JDK 17
-        const baseUrl = "https://api.adoptium.net/v3/binary/latest/17/ga"
+        // Using generic 'latest' API for JDK 21
+        const baseUrl = "https://api.adoptium.net/v3/binary/latest/21/ga"
 
         let osName = ''
         if (platform === 'win32') osName = 'windows'

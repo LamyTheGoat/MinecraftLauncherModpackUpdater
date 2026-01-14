@@ -273,7 +273,7 @@ ipcMain.on('launch-game', async (_event, { username }) => {
   let javaPath = 'java' // Default to system java if check fails, but we expect check to work
   try {
     win?.webContents.send('status', 'Checking Java Runtime...')
-    javaPath = await javaHandler.ensureJava17()
+    javaPath = await javaHandler.ensureJava()
   } catch (e: any) {
     console.error("Java Setup Failed:", e)
     win?.webContents.send('status', 'Java Setup Failed: ' + e.message)
